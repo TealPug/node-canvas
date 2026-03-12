@@ -396,6 +396,24 @@ export class NodeCanvas {
     const outputs = node.outputs ?? [];
     const rowCount = Math.max(inputs.length, outputs.length);
 
+    // Show standalone widget values for nodes with no inputs/outputs (e.g. Note)
+    if (rowCount === 0 && node.widgets) {
+      const values = Object.values(node.widgets).filter(
+        (v) => v !== undefined && v !== null && v !== "",
+      );
+      if (values.length > 0) {
+        const body = document.createElement("div");
+        body.style.padding = "6px 8px";
+        body.style.fontSize = "10px";
+        body.style.whiteSpace = "pre-wrap";
+        body.style.wordBreak = "break-word";
+        body.style.color = "#ccc";
+        body.textContent = values.map(String).join("\n");
+        el.appendChild(body);
+      }
+      return;
+    }
+
     if (rowCount === 0) return;
 
     // Unified row-based layout: each row index corresponds to either an
