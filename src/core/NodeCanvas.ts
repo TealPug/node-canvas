@@ -17,6 +17,15 @@ import { LayoutWorkerClient } from "../worker/LayoutWorkerClient.js";
 const DEFAULT_NODE_WIDTH = 200;
 const DEFAULT_NODE_HEIGHT = 100;
 
+function formatWidgetValue(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") return String(value);
+  if (typeof value === "string") return value.length > 30 ? value.slice(0, 27) + "…" : value;
+  if (typeof value === "object") return JSON.stringify(value).slice(0, 30);
+  return String(value);
+}
+
 /**
  * The main editor controller. Orchestrates the hybrid DOM + Canvas rendering:
  *
@@ -371,43 +380,85 @@ export class NodeCanvas {
     el.style.fontFamily = "system-ui, sans-serif";
     el.style.overflow = "hidden";
 
-    // Header
+    // Header — fixed 24px height to match ConnectionRenderer.HEADER_HEIGHT
     const header = document.createElement("div");
     header.style.background = style?.headerColor ?? "#0f3460";
-    header.style.padding = "4px 8px";
+    header.style.height = "24px";
+    header.style.lineHeight = "24px";
+    header.style.padding = "0 8px";
     header.style.fontWeight = "600";
     header.style.fontSize = "11px";
     header.style.userSelect = "none";
     header.textContent = node.title ?? node.type;
     el.appendChild(header);
 
-    // Slots
+    const inputs = node.inputs ?? [];
+    const outputs = node.outputs ?? [];
+    const rowCount = Math.max(inputs.length, outputs.length);
+
+    if (rowCount === 0) return;
+
+    // Unified row-based layout: each row index corresponds to either an
+    // input (left side) or output (right side). This keeps the visual row
+    // index in sync with the array index so ConnectionRenderer Y positions
+    // match exactly.
     const body = document.createElement("div");
     body.style.padding = "4px 8px";
-    body.style.display = "flex";
-    body.style.justifyContent = "space-between";
 
-    const inputs = document.createElement("div");
-    for (const input of node.inputs ?? []) {
+    for (let i = 0; i < rowCount; i++) {
+      const input = i < inputs.length ? inputs[i] : null;
+      const output = i < outputs.length ? outputs[i] : null;
+
+      const isWidgetOnly = input?.isWidget && input.link == null;
+
       const row = document.createElement("div");
+      row.style.display = "flex";
+      row.style.justifyContent = "space-between";
+      row.style.alignItems = "center";
+      row.style.height = "18px";
       row.style.fontSize = "10px";
-      row.style.padding = "2px 0";
-      row.textContent = `● ${input.name}`;
-      inputs.appendChild(row);
+      row.style.gap = "8px";
+
+      // Left side: input
+      const left = document.createElement("span");
+      left.style.whiteSpace = "nowrap";
+      if (input && isWidgetOnly) {
+        // Widget value (not connected) — show as label + value
+        left.style.display = "flex";
+        left.style.gap = "8px";
+        left.style.flex = "1";
+        left.style.justifyContent = "space-between";
+        const label = document.createElement("span");
+        label.style.color = "#888";
+        label.textContent = input.name;
+        const val = document.createElement("span");
+        val.style.color = "#aad";
+        val.style.overflow = "hidden";
+        val.style.textOverflow = "ellipsis";
+        val.style.maxWidth = "120px";
+        val.textContent = node.widgets
+          ? formatWidgetValue(node.widgets[input.name])
+          : "";
+        left.appendChild(label);
+        left.appendChild(val);
+      } else if (input) {
+        // Connection slot
+        left.textContent = `● ${input.name}`;
+      }
+
+      // Right side: output
+      const right = document.createElement("span");
+      right.style.whiteSpace = "nowrap";
+      right.style.textAlign = "right";
+      if (output) {
+        right.textContent = `${output.name} ●`;
+      }
+
+      row.appendChild(left);
+      row.appendChild(right);
+      body.appendChild(row);
     }
 
-    const outputs = document.createElement("div");
-    outputs.style.textAlign = "right";
-    for (const output of node.outputs ?? []) {
-      const row = document.createElement("div");
-      row.style.fontSize = "10px";
-      row.style.padding = "2px 0";
-      row.textContent = `${output.name} ●`;
-      outputs.appendChild(row);
-    }
-
-    body.appendChild(inputs);
-    body.appendChild(outputs);
     el.appendChild(body);
   }
 

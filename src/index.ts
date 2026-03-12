@@ -17,6 +17,10 @@ export { GridRenderer } from "./renderer/GridRenderer.js";
 // Worker
 export { LayoutWorkerClient } from "./worker/LayoutWorkerClient.js";
 
+// Converters
+export { comfyuiToGraphData, graphDataToComfyUI } from "./converters/comfyui.js";
+export type { ComfyUIRawWorkflow } from "./converters/comfyui.js";
+
 // Types
 export type {
   NodeSlot,

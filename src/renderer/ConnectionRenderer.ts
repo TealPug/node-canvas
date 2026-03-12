@@ -13,16 +13,17 @@ const DEFAULT_STYLE: Required<ConnectionStyle> = {
 };
 
 const DEFAULT_NODE_WIDTH = 200;
-const DEFAULT_HEADER_HEIGHT = 28;
-const SLOT_SPACING = 22;
-const SLOT_START_Y = 8;
+const DEFAULT_HEADER_HEIGHT = 24;
+const BODY_PADDING_TOP = 4;
+const ROW_HEIGHT = 18;
+const SLOT_START_Y = DEFAULT_HEADER_HEIGHT + BODY_PADDING_TOP + ROW_HEIGHT / 2 + 2;
 
 /**
  * Renders connections (edges) between nodes onto an HTML5 Canvas.
  *
- * This is the Canvas layer that sits underneath the DOM nodes. Connections are
- * drawn as cubic bezier curves. The canvas is redrawn on every frame where the
- * viewport or graph data has changed.
+ * Row positions use the raw input/output array index directly, since the DOM
+ * node renderer places every input and output at its original array index in a
+ * unified row layout.
  */
 export class ConnectionRenderer {
   private canvas: HTMLCanvasElement;
@@ -70,7 +71,14 @@ export class ConnectionRenderer {
       if (!source || !target) continue;
 
       const isSelected = selectedConnectionIds?.has(conn.id) ?? false;
-      this.drawConnection(ctx, source, conn.sourceOutputIndex, target, conn.targetInputIndex, isSelected);
+      this.drawConnection(
+        ctx,
+        source,
+        conn.sourceOutputIndex,
+        target,
+        conn.targetInputIndex,
+        isSelected,
+      );
     }
 
     ctx.restore();
@@ -88,16 +96,14 @@ export class ConnectionRenderer {
     const srcX = source.position.x + srcW;
     const srcY =
       source.position.y +
-      DEFAULT_HEADER_HEIGHT +
       SLOT_START_Y +
-      outputIndex * SLOT_SPACING;
+      outputIndex * ROW_HEIGHT;
 
     const tgtX = target.position.x;
     const tgtY =
       target.position.y +
-      DEFAULT_HEADER_HEIGHT +
       SLOT_START_Y +
-      inputIndex * SLOT_SPACING;
+      inputIndex * ROW_HEIGHT;
 
     const dx = Math.abs(tgtX - srcX) * this.style.curvature;
 

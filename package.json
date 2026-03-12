@@ -24,6 +24,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite build --watch",
+    "dev:demo": "vite --config vite.dev.config.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "test": "vitest run",

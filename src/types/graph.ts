@@ -16,7 +16,10 @@ export interface NodeSlot {
   link?: string | null;
 }
 
-export interface NodeInput extends NodeSlot {}
+export interface NodeInput extends NodeSlot {
+  /** If true, this input is rendered as an inline widget rather than a connection slot. */
+  isWidget?: boolean;
+}
 
 export interface NodeOutput extends NodeSlot {
   /** A single output can fan out to multiple links. */
