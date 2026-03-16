@@ -92,6 +92,7 @@ export class NodeCanvas {
   private dragGroupStarts = new Map<string, NodePosition>();
   private connectionDraft: ConnectionDraft | null = null;
   private snapTarget: SlotHit | null = null;
+  private hoveredSlot: SlotHit | null = null;
   private boxSelectStart = { x: 0, y: 0 };
   private boxSelectEnd = { x: 0, y: 0 };
   private resizeObserver: ResizeObserver | null = null;
@@ -431,6 +432,20 @@ export class NodeCanvas {
       nodeMap,
       vpState,
     );
+
+    // Slot hover highlight
+    if (this.hoveredSlot || this.snapTarget) {
+      const slot = this.snapTarget ?? this.hoveredSlot!;
+      ctx.save();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.translate(vpState.x, vpState.y);
+      ctx.scale(vpState.zoom, vpState.zoom);
+      ctx.beginPath();
+      ctx.arc(slot.x, slot.y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(74, 158, 255, 0.8)";
+      ctx.fill();
+      ctx.restore();
+    }
 
     // Draft connection
     if (this.isConnecting && this.connectionDraft) {
@@ -970,6 +985,25 @@ export class NodeCanvas {
       this.dragStart = { x: e.clientX, y: e.clientY };
       this.markDirty();
       this.events.emit("viewport:change", this.viewport.getState());
+    } else {
+      // Idle hover — check for slot under cursor
+      const rect = this.container.getBoundingClientRect();
+      const graphPos = this.viewport.screenToGraph(
+        e.clientX - rect.left,
+        e.clientY - rect.top,
+      );
+      const hit = this.hitTestSlot(graphPos.x, graphPos.y);
+      if (hit !== this.hoveredSlot) {
+        const changed =
+          hit?.nodeId !== this.hoveredSlot?.nodeId ||
+          hit?.slotIndex !== this.hoveredSlot?.slotIndex ||
+          hit?.slotType !== this.hoveredSlot?.slotType;
+        if (changed) {
+          this.hoveredSlot = hit;
+          this.container.style.cursor = hit ? "crosshair" : "";
+          this.markDirty();
+        }
+      }
     }
   };
 
