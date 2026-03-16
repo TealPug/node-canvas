@@ -5,6 +5,7 @@ import type {
   GraphData,
   GraphNode,
   GraphConnection,
+  NodePosition,
 } from "../types/index.js";
 import { EventEmitter } from "./EventEmitter.js";
 import { SpatialIndex } from "./SpatialIndex.js";
@@ -13,17 +14,40 @@ import { Viewport } from "../viewport/Viewport.js";
 import { ConnectionRenderer } from "../renderer/ConnectionRenderer.js";
 import { GridRenderer } from "../renderer/GridRenderer.js";
 import { LayoutWorkerClient } from "../worker/LayoutWorkerClient.js";
-
-const DEFAULT_NODE_WIDTH = 200;
-const DEFAULT_NODE_HEIGHT = 100;
+import { UndoManager } from "./UndoManager.js";
+import {
+  DEFAULT_NODE_WIDTH,
+  DEFAULT_NODE_HEIGHT,
+  SLOT_START_Y,
+  ROW_HEIGHT,
+  SLOT_HIT_RADIUS,
+} from "../constants/layout.js";
 
 function formatWidgetValue(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "number") return String(value);
-  if (typeof value === "string") return value.length > 30 ? value.slice(0, 27) + "…" : value;
+  if (typeof value === "string")
+    return value.length > 30 ? value.slice(0, 27) + "…" : value;
   if (typeof value === "object") return JSON.stringify(value).slice(0, 30);
   return String(value);
+}
+
+interface SlotHit {
+  nodeId: string;
+  slotType: "input" | "output";
+  slotIndex: number;
+  x: number;
+  y: number;
+}
+
+interface ConnectionDraft {
+  sourceNodeId: string;
+  sourceOutputIndex: number;
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
 }
 
 /**
@@ -50,6 +74,7 @@ export class NodeCanvas {
   private gridRenderer: GridRenderer;
   private events: EventEmitter;
   private layoutWorker: LayoutWorkerClient;
+  private undoManager: UndoManager;
   private config: EditorConfig;
 
   private mountedNodes = new Map<string, HTMLDivElement>();
@@ -60,10 +85,22 @@ export class NodeCanvas {
   // Interaction state
   private isDragging = false;
   private isPanning = false;
+  private isConnecting = false;
+  private isBoxSelecting = false;
   private dragNodeId: string | null = null;
   private dragStart = { x: 0, y: 0 };
-  private dragNodeStart = { x: 0, y: 0 };
+  private dragGroupStarts = new Map<string, NodePosition>();
+  private connectionDraft: ConnectionDraft | null = null;
+  private snapTarget: SlotHit | null = null;
+  private boxSelectStart = { x: 0, y: 0 };
+  private boxSelectEnd = { x: 0, y: 0 };
   private resizeObserver: ResizeObserver | null = null;
+
+  // Clipboard
+  private clipboard: {
+    nodes: GraphNode[];
+    connections: GraphConnection[];
+  } | null = null;
 
   /** Custom render function for node content. */
   renderNode:
@@ -77,6 +114,7 @@ export class NodeCanvas {
     this.viewport = new Viewport(config.minZoom, config.maxZoom);
     this.spatialIndex = new SpatialIndex();
     this.events = new EventEmitter();
+    this.undoManager = new UndoManager();
     this.gridRenderer = new GridRenderer(
       config.theme?.gridSize,
       config.theme?.gridColor,
@@ -87,6 +125,8 @@ export class NodeCanvas {
     container.style.position = "relative";
     container.style.overflow = "hidden";
     container.style.background = config.theme?.background ?? "#1a1a2e";
+    container.tabIndex = -1;
+    container.style.outline = "none";
 
     this.canvasEl = document.createElement("canvas");
     this.canvasEl.style.position = "absolute";
@@ -134,6 +174,11 @@ export class NodeCanvas {
     for (const node of this.graph.getAllNodes()) {
       this.spatialIndex.update(node);
     }
+    // Unmount all existing DOM nodes and rebuild
+    for (const [id] of this.mountedNodes) {
+      this.unmountNode(id);
+    }
+    this.undoManager.push(this.graph.serialize());
     this.markDirty();
     this.events.emit("graph:change", { data: this.graph.serialize() });
   }
@@ -143,6 +188,7 @@ export class NodeCanvas {
   }
 
   addNode(node: GraphNode): void {
+    this.pushUndo();
     this.graph.addNode(node);
     this.spatialIndex.update(node);
     this.markDirty();
@@ -154,6 +200,7 @@ export class NodeCanvas {
     const removedConns = this.graph.removeNode(nodeId);
     this.spatialIndex.remove(nodeId);
     this.unmountNode(nodeId);
+    this.selectedNodeIds.delete(nodeId);
     for (const conn of removedConns) {
       this.events.emit("connection:remove", { connectionId: conn.id });
     }
@@ -163,6 +210,7 @@ export class NodeCanvas {
   }
 
   addConnection(connection: GraphConnection): void {
+    this.pushUndo();
     this.graph.addConnection(connection);
     this.markDirty();
     this.events.emit("connection:add", { connection });
@@ -170,13 +218,43 @@ export class NodeCanvas {
   }
 
   removeConnection(connectionId: string): void {
+    this.pushUndo();
     this.graph.removeConnection(connectionId);
     this.markDirty();
     this.events.emit("connection:remove", { connectionId });
     this.events.emit("graph:change", { data: this.graph.serialize() });
   }
 
+  undo(): void {
+    const snapshot = this.undoManager.undo();
+    if (snapshot) {
+      this.graph.load(snapshot);
+      this.rebuildSpatialIndex();
+      this.clearSelection();
+      for (const [id] of this.mountedNodes) {
+        this.unmountNode(id);
+      }
+      this.markDirty();
+      this.events.emit("graph:change", { data: this.graph.serialize() });
+    }
+  }
+
+  redo(): void {
+    const snapshot = this.undoManager.redo();
+    if (snapshot) {
+      this.graph.load(snapshot);
+      this.rebuildSpatialIndex();
+      this.clearSelection();
+      for (const [id] of this.mountedNodes) {
+        this.unmountNode(id);
+      }
+      this.markDirty();
+      this.events.emit("graph:change", { data: this.graph.serialize() });
+    }
+  }
+
   async autoLayout(iterations?: number): Promise<void> {
+    this.pushUndo();
     const positions = await this.layoutWorker.computeLayout(
       this.graph.getAllNodes(),
       this.graph.getAllConnections(),
@@ -202,8 +280,14 @@ export class NodeCanvas {
     for (const n of nodes) {
       minX = Math.min(minX, n.position.x);
       minY = Math.min(minY, n.position.y);
-      maxX = Math.max(maxX, n.position.x + (n.size?.width ?? DEFAULT_NODE_WIDTH));
-      maxY = Math.max(maxY, n.position.y + (n.size?.height ?? DEFAULT_NODE_HEIGHT));
+      maxX = Math.max(
+        maxX,
+        n.position.x + (n.size?.width ?? DEFAULT_NODE_WIDTH),
+      );
+      maxY = Math.max(
+        maxY,
+        n.position.y + (n.size?.height ?? DEFAULT_NODE_HEIGHT),
+      );
     }
     this.viewport.zoomToFit(
       { x: minX, y: minY, width: maxX - minX, height: maxY - minY },
@@ -213,11 +297,17 @@ export class NodeCanvas {
     this.events.emit("viewport:change", this.viewport.getState());
   }
 
-  on<T extends EditorEventType>(type: T, handler: EditorEventHandler<T>): () => void {
+  on<T extends EditorEventType>(
+    type: T,
+    handler: EditorEventHandler<T>,
+  ): () => void {
     return this.events.on(type, handler);
   }
 
-  off<T extends EditorEventType>(type: T, handler: EditorEventHandler<T>): void {
+  off<T extends EditorEventType>(
+    type: T,
+    handler: EditorEventHandler<T>,
+  ): void {
     this.events.off(type, handler);
   }
 
@@ -234,6 +324,21 @@ export class NodeCanvas {
     this.container.removeChild(this.canvasEl);
     this.container.removeChild(this.nodeLayer);
     this.mountedNodes.clear();
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // Undo helpers
+  // ════════════════════════════════════════════════════════════════════
+
+  private pushUndo(): void {
+    this.undoManager.push(this.graph.serialize());
+  }
+
+  private rebuildSpatialIndex(): void {
+    this.spatialIndex.clear();
+    for (const node of this.graph.getAllNodes()) {
+      this.spatialIndex.update(node);
+    }
   }
 
   // ════════════════════════════════════════════════════════════════════
@@ -270,7 +375,6 @@ export class NodeCanvas {
 
     // Determine visible nodes via spatial index
     const visibleRect = this.viewport.getVisibleRect();
-    // Add buffer around viewport for smoother scrolling
     const buffer = 200 / vpState.zoom;
     const queryRect = {
       x: visibleRect.x - buffer,
@@ -327,6 +431,49 @@ export class NodeCanvas {
       nodeMap,
       vpState,
     );
+
+    // Draft connection
+    if (this.isConnecting && this.connectionDraft) {
+      const draft = this.connectionDraft;
+      this.connectionRenderer.renderDraft(
+        draft.startX,
+        draft.startY,
+        draft.currentX,
+        draft.currentY,
+        vpState,
+        this.snapTarget !== null,
+      );
+    }
+
+    // Box selection rectangle
+    if (this.isBoxSelecting) {
+      this.renderSelectionBox(ctx, vpState, dpr);
+    }
+  }
+
+  private renderSelectionBox(
+    ctx: CanvasRenderingContext2D,
+    viewport: { x: number; y: number; zoom: number },
+    dpr: number,
+  ): void {
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.translate(viewport.x, viewport.y);
+    ctx.scale(viewport.zoom, viewport.zoom);
+
+    const x = Math.min(this.boxSelectStart.x, this.boxSelectEnd.x);
+    const y = Math.min(this.boxSelectStart.y, this.boxSelectEnd.y);
+    const w = Math.abs(this.boxSelectEnd.x - this.boxSelectStart.x);
+    const h = Math.abs(this.boxSelectEnd.y - this.boxSelectStart.y);
+
+    const color = this.config.theme?.selectionBoxColor ?? "rgba(74, 158, 255, 0.15)";
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "rgba(74, 158, 255, 0.6)";
+    ctx.lineWidth = 1 / viewport.zoom;
+    ctx.strokeRect(x, y, w, h);
+
+    ctx.restore();
   }
 
   // ════════════════════════════════════════════════════════════════════
@@ -350,7 +497,6 @@ export class NodeCanvas {
       el.classList.add("tnc-node--selected");
     }
 
-    // Default rendering — consumer can override via renderNode
     if (this.renderNode) {
       this.renderNode(node, el);
     } else {
@@ -416,10 +562,6 @@ export class NodeCanvas {
 
     if (rowCount === 0) return;
 
-    // Unified row-based layout: each row index corresponds to either an
-    // input (left side) or output (right side). This keeps the visual row
-    // index in sync with the array index so ConnectionRenderer Y positions
-    // match exactly.
     const body = document.createElement("div");
     body.style.padding = "4px 8px";
 
@@ -441,7 +583,6 @@ export class NodeCanvas {
       const left = document.createElement("span");
       left.style.whiteSpace = "nowrap";
       if (input && isWidgetOnly) {
-        // Widget value (not connected) — show as label + value
         left.style.display = "flex";
         left.style.gap = "8px";
         left.style.flex = "1";
@@ -460,7 +601,6 @@ export class NodeCanvas {
         left.appendChild(label);
         left.appendChild(val);
       } else if (input) {
-        // Connection slot
         left.textContent = `● ${input.name}`;
       }
 
@@ -481,18 +621,209 @@ export class NodeCanvas {
   }
 
   // ════════════════════════════════════════════════════════════════════
+  // Slot hit detection
+  // ════════════════════════════════════════════════════════════════════
+
+  private hitTestSlot(graphX: number, graphY: number): SlotHit | null {
+    // Query nearby nodes from spatial index
+    const queryRect = {
+      x: graphX - SLOT_HIT_RADIUS * 2,
+      y: graphY - SLOT_HIT_RADIUS * 2,
+      width: SLOT_HIT_RADIUS * 4,
+      height: SLOT_HIT_RADIUS * 4,
+    };
+    const nearbyIds = this.spatialIndex.query(queryRect);
+
+    let bestHit: SlotHit | null = null;
+    let bestDist = SLOT_HIT_RADIUS;
+
+    for (const nodeId of nearbyIds) {
+      const node = this.graph.getNode(nodeId);
+      if (!node) continue;
+
+      const nodeW = node.size?.width ?? DEFAULT_NODE_WIDTH;
+
+      // Check output slots (right edge)
+      const outputs = node.outputs ?? [];
+      for (let i = 0; i < outputs.length; i++) {
+        const sx = node.position.x + nodeW;
+        const sy = node.position.y + SLOT_START_Y + i * ROW_HEIGHT;
+        const dist = Math.hypot(graphX - sx, graphY - sy);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestHit = { nodeId, slotType: "output", slotIndex: i, x: sx, y: sy };
+        }
+      }
+
+      // Check input slots (left edge) — skip widget-only inputs
+      const inputs = node.inputs ?? [];
+      for (let i = 0; i < inputs.length; i++) {
+        const inp = inputs[i];
+        if (inp.isWidget && inp.link == null) continue;
+        const sx = node.position.x;
+        const sy = node.position.y + SLOT_START_Y + i * ROW_HEIGHT;
+        const dist = Math.hypot(graphX - sx, graphY - sy);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestHit = { nodeId, slotType: "input", slotIndex: i, x: sx, y: sy };
+        }
+      }
+    }
+
+    return bestHit;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // Clipboard
+  // ════════════════════════════════════════════════════════════════════
+
+  private copySelection(): void {
+    if (this.selectedNodeIds.size === 0) return;
+
+    const nodes: GraphNode[] = [];
+    for (const id of this.selectedNodeIds) {
+      const node = this.graph.getNode(id);
+      if (node) nodes.push(structuredClone(node));
+    }
+
+    // Only include connections where both endpoints are selected
+    const connections = this.graph
+      .getAllConnections()
+      .filter(
+        (c) =>
+          this.selectedNodeIds.has(c.sourceNodeId) &&
+          this.selectedNodeIds.has(c.targetNodeId),
+      )
+      .map((c) => structuredClone(c));
+
+    this.clipboard = { nodes, connections };
+  }
+
+  private pasteClipboard(): void {
+    if (!this.clipboard || this.clipboard.nodes.length === 0) return;
+
+    this.pushUndo();
+
+    const idMap = new Map<string, string>();
+    for (const node of this.clipboard.nodes) {
+      idMap.set(node.id, crypto.randomUUID());
+    }
+
+    this.clearSelection();
+
+    // Add nodes with new IDs and offset positions
+    for (const orig of this.clipboard.nodes) {
+      const newNode: GraphNode = {
+        ...structuredClone(orig),
+        id: idMap.get(orig.id)!,
+        position: { x: orig.position.x + 30, y: orig.position.y + 30 },
+      };
+      this.graph.addNode(newNode);
+      this.spatialIndex.update(newNode);
+      this.selectNode(newNode.id);
+      this.events.emit("node:add", { node: newNode });
+    }
+
+    // Add remapped connections
+    for (const orig of this.clipboard.connections) {
+      const newConn: GraphConnection = {
+        id: crypto.randomUUID(),
+        sourceNodeId: idMap.get(orig.sourceNodeId)!,
+        sourceOutputIndex: orig.sourceOutputIndex,
+        targetNodeId: idMap.get(orig.targetNodeId)!,
+        targetInputIndex: orig.targetInputIndex,
+      };
+      this.graph.addConnection(newConn);
+      this.events.emit("connection:add", { connection: newConn });
+    }
+
+    // Update clipboard positions so subsequent pastes cascade
+    for (const node of this.clipboard.nodes) {
+      node.position.x += 30;
+      node.position.y += 30;
+    }
+
+    this.markDirty();
+    this.events.emit("graph:change", { data: this.graph.serialize() });
+  }
+
+  // ════════════════════════════════════════════════════════════════════
   // Interaction handling
   // ════════════════════════════════════════════════════════════════════
 
   private onPointerDown = (e: PointerEvent): void => {
     if (this.config.readOnly) return;
+    this.container.focus();
 
+    // Convert to graph space for slot hit test
+    const rect = this.container.getBoundingClientRect();
+    const screenX = e.clientX - rect.left;
+    const screenY = e.clientY - rect.top;
+    const graphPos = this.viewport.screenToGraph(screenX, screenY);
+
+    // 1. Check for slot hit (connection creation / rewiring)
+    const slotHit = this.hitTestSlot(graphPos.x, graphPos.y);
+    if (slotHit && slotHit.slotType === "output") {
+      // Drag from output → start new connection
+      this.isConnecting = true;
+      this.connectionDraft = {
+        sourceNodeId: slotHit.nodeId,
+        sourceOutputIndex: slotHit.slotIndex,
+        startX: slotHit.x,
+        startY: slotHit.y,
+        currentX: graphPos.x,
+        currentY: graphPos.y,
+      };
+      this.container.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      return;
+    }
+    if (slotHit && slotHit.slotType === "input") {
+      // Drag from connected input → disconnect and rewire from original source
+      const existingConn = this.graph
+        .getAllConnections()
+        .find(
+          (c) =>
+            c.targetNodeId === slotHit.nodeId &&
+            c.targetInputIndex === slotHit.slotIndex,
+        );
+      if (existingConn) {
+        this.pushUndo();
+        const sourceNode = this.graph.getNode(existingConn.sourceNodeId);
+        const sourceW = sourceNode?.size?.width ?? DEFAULT_NODE_WIDTH;
+        const startX = (sourceNode?.position.x ?? 0) + sourceW;
+        const startY =
+          (sourceNode?.position.y ?? 0) +
+          SLOT_START_Y +
+          existingConn.sourceOutputIndex * ROW_HEIGHT;
+
+        this.graph.removeConnection(existingConn.id);
+        this.events.emit("connection:remove", {
+          connectionId: existingConn.id,
+        });
+        this.events.emit("graph:change", { data: this.graph.serialize() });
+
+        this.isConnecting = true;
+        this.connectionDraft = {
+          sourceNodeId: existingConn.sourceNodeId,
+          sourceOutputIndex: existingConn.sourceOutputIndex,
+          startX,
+          startY,
+          currentX: graphPos.x,
+          currentY: graphPos.y,
+        };
+        this.container.setPointerCapture(e.pointerId);
+        e.preventDefault();
+        return;
+      }
+    }
+
+    // 2. Check for node hit (dragging)
     const target = (e.target as HTMLElement).closest<HTMLDivElement>(
       "[data-node-id]",
     );
 
     if (target && target.dataset.nodeId) {
-      // Start dragging a node
       const nodeId = target.dataset.nodeId;
       const node = this.graph.getNode(nodeId);
       if (!node) return;
@@ -500,18 +831,34 @@ export class NodeCanvas {
       this.isDragging = true;
       this.dragNodeId = nodeId;
       this.dragStart = { x: e.clientX, y: e.clientY };
-      this.dragNodeStart = { ...node.position };
 
       if (!e.shiftKey) {
-        this.clearSelection();
+        if (!this.selectedNodeIds.has(nodeId)) {
+          this.clearSelection();
+        }
       }
       this.selectNode(nodeId);
+
+      // Store start positions for all selected nodes (multi-drag)
+      this.dragGroupStarts.clear();
+      for (const id of this.selectedNodeIds) {
+        const n = this.graph.getNode(id);
+        if (n) this.dragGroupStarts.set(id, { ...n.position });
+      }
 
       this.container.setPointerCapture(e.pointerId);
       e.preventDefault();
     } else {
-      // Start panning
-      this.isPanning = true;
+      // 3. Empty space: box select (Ctrl) or pan
+      if (e.ctrlKey || e.metaKey) {
+        this.isBoxSelecting = true;
+        this.boxSelectStart = graphPos;
+        this.boxSelectEnd = graphPos;
+        if (!e.shiftKey) this.clearSelection();
+      } else {
+        this.isPanning = true;
+        this.clearSelection();
+      }
       this.dragStart = { x: e.clientX, y: e.clientY };
       this.container.setPointerCapture(e.pointerId);
       e.preventDefault();
@@ -519,16 +866,102 @@ export class NodeCanvas {
   };
 
   private onPointerMove = (e: PointerEvent): void => {
-    if (this.isDragging && this.dragNodeId) {
+    if (this.isConnecting && this.connectionDraft) {
+      const rect = this.container.getBoundingClientRect();
+      const graphPos = this.viewport.screenToGraph(
+        e.clientX - rect.left,
+        e.clientY - rect.top,
+      );
+      this.connectionDraft.currentX = graphPos.x;
+      this.connectionDraft.currentY = graphPos.y;
+
+      // Check for snap target
+      const hit = this.hitTestSlot(graphPos.x, graphPos.y);
+      if (
+        hit &&
+        hit.slotType === "input" &&
+        this.graph.canConnect(
+          this.connectionDraft.sourceNodeId,
+          this.connectionDraft.sourceOutputIndex,
+          hit.nodeId,
+          hit.slotIndex,
+        )
+      ) {
+        this.snapTarget = hit;
+        this.connectionDraft.currentX = hit.x;
+        this.connectionDraft.currentY = hit.y;
+      } else {
+        this.snapTarget = null;
+      }
+
+      this.markDirty();
+    } else if (this.isDragging && this.dragNodeId) {
       const zoom = this.viewport.getState().zoom;
       const dx = (e.clientX - this.dragStart.x) / zoom;
       const dy = (e.clientY - this.dragStart.y) / zoom;
-      const newX = this.dragNodeStart.x + dx;
-      const newY = this.dragNodeStart.y + dy;
 
-      this.graph.updateNodePosition(this.dragNodeId, newX, newY);
-      const node = this.graph.getNode(this.dragNodeId);
-      if (node) this.spatialIndex.update(node);
+      // Move all selected nodes together
+      for (const [id, startPos] of this.dragGroupStarts) {
+        const newX = startPos.x + dx;
+        const newY = startPos.y + dy;
+        this.graph.updateNodePosition(id, newX, newY);
+        const node = this.graph.getNode(id);
+        if (node) this.spatialIndex.update(node);
+      }
+
+      this.markDirty();
+    } else if (this.isBoxSelecting) {
+      const rect = this.container.getBoundingClientRect();
+      this.boxSelectEnd = this.viewport.screenToGraph(
+        e.clientX - rect.left,
+        e.clientY - rect.top,
+      );
+
+      // Select nodes within the box
+      const minX = Math.min(this.boxSelectStart.x, this.boxSelectEnd.x);
+      const minY = Math.min(this.boxSelectStart.y, this.boxSelectEnd.y);
+      const maxX = Math.max(this.boxSelectStart.x, this.boxSelectEnd.x);
+      const maxY = Math.max(this.boxSelectStart.y, this.boxSelectEnd.y);
+
+      // Get candidates from spatial index, then filter to nodes actually inside the box
+      const candidates = this.spatialIndex.query({
+        x: minX,
+        y: minY,
+        width: maxX - minX,
+        height: maxY - minY,
+      });
+      const inBox = new Set<string>();
+      for (const id of candidates) {
+        const node = this.graph.getNode(id);
+        if (!node) continue;
+        const nw = node.size?.width ?? DEFAULT_NODE_WIDTH;
+        const nh = node.size?.height ?? DEFAULT_NODE_HEIGHT;
+        // Node must be fully or partially inside the selection box
+        if (
+          node.position.x + nw >= minX &&
+          node.position.x <= maxX &&
+          node.position.y + nh >= minY &&
+          node.position.y <= maxY
+        ) {
+          inBox.add(id);
+        }
+      }
+
+      // Update selection to match box contents
+      for (const id of this.selectedNodeIds) {
+        if (!inBox.has(id)) {
+          this.selectedNodeIds.delete(id);
+          const el = this.mountedNodes.get(id);
+          if (el) el.classList.remove("tnc-node--selected");
+          this.events.emit("node:deselect", { nodeId: id });
+        }
+      }
+      for (const id of inBox) {
+        if (!this.selectedNodeIds.has(id)) {
+          this.selectNode(id);
+        }
+      }
+
       this.markDirty();
     } else if (this.isPanning) {
       const dx = e.clientX - this.dragStart.x;
@@ -541,29 +974,137 @@ export class NodeCanvas {
   };
 
   private onPointerUp = (e: PointerEvent): void => {
-    if (this.isDragging && this.dragNodeId) {
+    if (this.isConnecting && this.connectionDraft) {
+      if (this.snapTarget) {
+        this.pushUndo();
+        const connection: GraphConnection = {
+          id: crypto.randomUUID(),
+          sourceNodeId: this.connectionDraft.sourceNodeId,
+          sourceOutputIndex: this.connectionDraft.sourceOutputIndex,
+          targetNodeId: this.snapTarget.nodeId,
+          targetInputIndex: this.snapTarget.slotIndex,
+        };
+        this.graph.addConnection(connection);
+        this.events.emit("connection:add", { connection });
+        this.events.emit("graph:change", { data: this.graph.serialize() });
+      }
+      this.isConnecting = false;
+      this.connectionDraft = null;
+      this.snapTarget = null;
+      this.markDirty();
+    } else if (this.isDragging && this.dragNodeId) {
+      // Push undo only if position actually changed
+      const startPos = this.dragGroupStarts.get(this.dragNodeId);
       const node = this.graph.getNode(this.dragNodeId);
-      if (node) {
-        this.events.emit("node:move", {
-          nodeId: this.dragNodeId,
-          position: { ...node.position },
-        });
+      if (
+        node &&
+        startPos &&
+        (node.position.x !== startPos.x || node.position.y !== startPos.y)
+      ) {
+        this.pushUndo();
+        for (const id of this.selectedNodeIds) {
+          const n = this.graph.getNode(id);
+          if (n) {
+            this.events.emit("node:move", {
+              nodeId: id,
+              position: { ...n.position },
+            });
+          }
+        }
         this.events.emit("graph:change", { data: this.graph.serialize() });
       }
     }
 
     this.isDragging = false;
     this.isPanning = false;
+    this.isBoxSelecting = false;
     this.dragNodeId = null;
+    this.dragGroupStarts.clear();
     this.container.releasePointerCapture(e.pointerId);
+    this.markDirty();
   };
 
   private onWheel = (e: WheelEvent): void => {
     e.preventDefault();
     const rect = this.container.getBoundingClientRect();
-    this.viewport.zoomAt(e.clientX - rect.left, e.clientY - rect.top, e.deltaY);
+    this.viewport.zoomAt(
+      e.clientX - rect.left,
+      e.clientY - rect.top,
+      e.deltaY,
+    );
     this.markDirty();
     this.events.emit("viewport:change", this.viewport.getState());
+  };
+
+  private onKeyDown = (e: KeyboardEvent): void => {
+    if (this.config.readOnly) return;
+
+    const ctrl = e.ctrlKey || e.metaKey;
+
+    // Delete selected nodes
+    if (e.key === "Delete" || e.key === "Backspace") {
+      if (this.selectedNodeIds.size === 0) return;
+      e.preventDefault();
+      this.pushUndo();
+      const ids = [...this.selectedNodeIds];
+      for (const id of ids) {
+        this.removeNode(id);
+      }
+      this.selectedNodeIds.clear();
+      return;
+    }
+
+    // Undo
+    if (ctrl && e.key === "z" && !e.shiftKey) {
+      e.preventDefault();
+      this.undo();
+      return;
+    }
+
+    // Redo
+    if (ctrl && (e.key === "y" || (e.key === "z" && e.shiftKey))) {
+      e.preventDefault();
+      this.redo();
+      return;
+    }
+
+    // Copy
+    if (ctrl && e.key === "c") {
+      e.preventDefault();
+      this.copySelection();
+      return;
+    }
+
+    // Paste
+    if (ctrl && e.key === "v") {
+      e.preventDefault();
+      this.pasteClipboard();
+      return;
+    }
+
+    // Cut
+    if (ctrl && e.key === "x") {
+      e.preventDefault();
+      this.copySelection();
+      if (this.selectedNodeIds.size > 0) {
+        this.pushUndo();
+        const ids = [...this.selectedNodeIds];
+        for (const id of ids) {
+          this.removeNode(id);
+        }
+        this.selectedNodeIds.clear();
+      }
+      return;
+    }
+
+    // Select all
+    if (ctrl && e.key === "a") {
+      e.preventDefault();
+      for (const node of this.graph.getAllNodes()) {
+        this.selectNode(node.id);
+      }
+      return;
+    }
   };
 
   private selectNode(nodeId: string): void {
@@ -587,6 +1128,7 @@ export class NodeCanvas {
     this.container.addEventListener("pointermove", this.onPointerMove);
     this.container.addEventListener("pointerup", this.onPointerUp);
     this.container.addEventListener("wheel", this.onWheel, { passive: false });
+    this.container.addEventListener("keydown", this.onKeyDown);
   }
 
   private unbindEvents(): void {
@@ -594,6 +1136,7 @@ export class NodeCanvas {
     this.container.removeEventListener("pointermove", this.onPointerMove);
     this.container.removeEventListener("pointerup", this.onPointerUp);
     this.container.removeEventListener("wheel", this.onWheel);
+    this.container.removeEventListener("keydown", this.onKeyDown);
   }
 
   // ════════════════════════════════════════════════════════════════════

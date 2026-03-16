@@ -4,6 +4,11 @@ import type {
   ConnectionStyle,
 } from "../types/index.js";
 import type { ViewportState } from "../viewport/Viewport.js";
+import {
+  DEFAULT_NODE_WIDTH,
+  ROW_HEIGHT,
+  SLOT_START_Y,
+} from "../constants/layout.js";
 
 const DEFAULT_STYLE: Required<ConnectionStyle> = {
   color: "#888888",
@@ -11,12 +16,6 @@ const DEFAULT_STYLE: Required<ConnectionStyle> = {
   width: 2,
   curvature: 0.5,
 };
-
-const DEFAULT_NODE_WIDTH = 200;
-const DEFAULT_HEADER_HEIGHT = 24;
-const BODY_PADDING_TOP = 4;
-const ROW_HEIGHT = 18;
-const SLOT_START_Y = DEFAULT_HEADER_HEIGHT + BODY_PADDING_TOP + ROW_HEIGHT / 2 + 2;
 
 /**
  * Renders connections (edges) between nodes onto an HTML5 Canvas.
@@ -114,5 +113,35 @@ export class ConnectionRenderer {
     ctx.strokeStyle = selected ? this.style.selectedColor : this.style.color;
     ctx.lineWidth = selected ? this.style.width + 1 : this.style.width;
     ctx.stroke();
+  }
+
+  /** Draw a temporary connection being dragged by the user. */
+  renderDraft(
+    startX: number,
+    startY: number,
+    endX: number,
+    endY: number,
+    viewport: ViewportState,
+    valid: boolean,
+  ): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.translate(viewport.x, viewport.y);
+    ctx.scale(viewport.zoom, viewport.zoom);
+
+    const dx = Math.abs(endX - startX) * this.style.curvature;
+    ctx.beginPath();
+    ctx.moveTo(startX, startY);
+    ctx.bezierCurveTo(startX + dx, startY, endX - dx, endY, endX, endY);
+
+    ctx.strokeStyle = valid
+      ? "rgba(74, 158, 255, 0.8)"
+      : "rgba(255, 80, 80, 0.6)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
   }
 }

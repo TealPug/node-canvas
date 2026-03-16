@@ -116,6 +116,41 @@ export class Graph {
     this.connections.delete(id);
   }
 
+  /** Check if a connection between two slots is valid. */
+  canConnect(
+    sourceNodeId: string,
+    sourceOutputIndex: number,
+    targetNodeId: string,
+    targetInputIndex: number,
+  ): boolean {
+    if (sourceNodeId === targetNodeId) return false;
+
+    const source = this.nodes.get(sourceNodeId);
+    const target = this.nodes.get(targetNodeId);
+    if (!source || !target) return false;
+
+    const output = source.outputs?.[sourceOutputIndex];
+    const input = target.inputs?.[targetInputIndex];
+    if (!output || !input) return false;
+
+    // Check if target input already has a connection
+    for (const conn of this.connections.values()) {
+      if (
+        conn.targetNodeId === targetNodeId &&
+        conn.targetInputIndex === targetInputIndex
+      ) {
+        return false;
+      }
+    }
+
+    // Type compatibility: exact match or wildcard "*"
+    if (output.type !== "*" && input.type !== "*" && output.type !== input.type) {
+      return false;
+    }
+
+    return true;
+  }
+
   get nodeCount(): number {
     return this.nodes.size;
   }

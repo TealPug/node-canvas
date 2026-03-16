@@ -2,6 +2,7 @@
 export { NodeCanvas } from "./core/NodeCanvas.js";
 export { EventEmitter } from "./core/EventEmitter.js";
 export { SpatialIndex } from "./core/SpatialIndex.js";
+export { UndoManager } from "./core/UndoManager.js";
 
 // Graph
 export { Graph } from "./graph/Graph.js";
