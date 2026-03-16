@@ -977,6 +977,22 @@ export class NodeCanvas {
     if (this.isConnecting && this.connectionDraft) {
       if (this.snapTarget) {
         this.pushUndo();
+
+        // Remove any existing connection on the target input (replace)
+        const existing = this.graph
+          .getAllConnections()
+          .find(
+            (c) =>
+              c.targetNodeId === this.snapTarget!.nodeId &&
+              c.targetInputIndex === this.snapTarget!.slotIndex,
+          );
+        if (existing) {
+          this.graph.removeConnection(existing.id);
+          this.events.emit("connection:remove", {
+            connectionId: existing.id,
+          });
+        }
+
         const connection: GraphConnection = {
           id: crypto.randomUUID(),
           sourceNodeId: this.connectionDraft.sourceNodeId,

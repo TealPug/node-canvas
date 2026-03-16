@@ -133,9 +133,11 @@ export class Graph {
     const input = target.inputs?.[targetInputIndex];
     if (!output || !input) return false;
 
-    // Check if target input already has a connection
+    // Prevent duplicate: same source+target already connected
     for (const conn of this.connections.values()) {
       if (
+        conn.sourceNodeId === sourceNodeId &&
+        conn.sourceOutputIndex === sourceOutputIndex &&
         conn.targetNodeId === targetNodeId &&
         conn.targetInputIndex === targetInputIndex
       ) {
