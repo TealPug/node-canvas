@@ -104,6 +104,8 @@ editor.renderNode = (node, element) => {
 | `removeNode(nodeId)` | Remove a node and its connections |
 | `addConnection(conn)` | Add a connection between two nodes |
 | `removeConnection(id)` | Remove a connection |
+| `undo()` | Undo the last action |
+| `redo()` | Redo the last undone action |
 | `autoLayout(iterations?)` | Run force-directed layout via Web Worker |
 | `zoomToFit(padding?)` | Zoom/pan to fit all nodes in view |
 | `on(event, handler)` | Subscribe to an event (returns unsubscribe fn) |
@@ -125,7 +127,7 @@ editor.renderNode = (node, element) => {
 
 ## Roadmap
 
-### v0.1 — Foundation (current)
+### v0.1 — Foundation
 - [x] Hybrid DOM + Canvas rendering architecture
 - [x] Pan, zoom, node drag interactions
 - [x] Spatial index with viewport culling
@@ -134,13 +136,18 @@ editor.renderNode = (node, element) => {
 - [x] React component wrapper
 - [x] Typed event system
 
-### v0.2 — Editing
-- [ ] Interactive connection creation (drag from output to input)
-- [ ] Connection snapping and validation (type-compatible slots only)
-- [ ] Node deletion via keyboard (Delete/Backspace)
-- [ ] Undo/redo stack
-- [ ] Multi-node selection (Shift+click, box select)
-- [ ] Copy/paste nodes
+### v0.2 — Editing (current)
+- [x] Interactive connection creation (drag from output to input)
+- [x] Connection snapping and validation (type-compatible slots only)
+- [x] Connection rewiring (drag from connected input to reconnect)
+- [x] Connection replacement (drop onto occupied input to replace)
+- [x] Node deletion via keyboard (Delete/Backspace)
+- [x] Undo/redo stack (Ctrl+Z / Ctrl+Shift+Z)
+- [x] Multi-node selection (Shift+click, Ctrl+drag box select)
+- [x] Multi-node drag (move all selected nodes together)
+- [x] Copy/paste/cut nodes (Ctrl+C/V/X) with connection preservation
+- [x] Select all (Ctrl+A)
+- [x] Slot hover highlights with cursor change
 
 ### v0.3 — Theming & Node Widgets
 - [ ] Built-in widget renderers (text fields, dropdowns, sliders, checkboxes)

@@ -1,6 +1,6 @@
 {
   "name": "tealpug-node-canvas",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A lightweight, high-performance node graph editor using hybrid DOM + Canvas rendering with Web Worker support",
   "type": "module",
   "main": "dist/index.cjs",
